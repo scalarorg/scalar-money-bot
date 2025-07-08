@@ -7,7 +7,10 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"os"
+	"scalar-money-bot/constants"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
@@ -81,16 +85,80 @@ type BotStatus struct {
 	LastCheck     string `json:"lastCheck"`
 }
 
+// Config holds all configuration values
+type Config struct {
+	RPCURL          string
+	CauldronAddress string
+	PrivateKey      string
+	CheckInterval   time.Duration
+	Port            string
+	LogLevel        string
+}
+
+// LoadConfig loads configuration from environment variables
+func LoadConfig() (*Config, error) {
+	// Load .env file if it exists
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, using environment variables")
+	}
+
+	config := &Config{
+		RPCURL:          getEnv("RPC_URL", ""),
+		CauldronAddress: getEnv("CAULDRON_ADDRESS", ""),
+		PrivateKey:      getEnv("PRIVATE_KEY", ""),
+		Port:            getEnv("PORT", "8080"),
+		LogLevel:        getEnv("LOG_LEVEL", "info"),
+	}
+
+	// Parse check interval
+	checkIntervalStr := getEnv("CHECK_INTERVAL", "10s")
+	interval, err := time.ParseDuration(checkIntervalStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid CHECK_INTERVAL format: %v", err)
+	}
+	config.CheckInterval = interval
+
+	// Validate required fields
+	if config.RPCURL == "" {
+		return nil, fmt.Errorf("RPC_URL is required")
+	}
+	if config.CauldronAddress == "" {
+		return nil, fmt.Errorf("CAULDRON_ADDRESS is required")
+	}
+	if config.PrivateKey == "" {
+		return nil, fmt.Errorf("PRIVATE_KEY is required")
+	}
+	return config, nil
+}
+
+// getEnv gets an environment variable or returns a default value
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// parseABI parses the ABI from JSON string
+func parseABI(abiJSON string) (abi.ABI, error) {
+	return abi.JSON(strings.NewReader(abiJSON))
+}
+
 // NewLiquidationBot creates a new liquidation bot instance
-func NewLiquidationBot(rpcURL, cauldronAddress, privateKeyHex string, cauldronABI abi.ABI) (*LiquidationBot, error) {
-	client, err := ethclient.Dial(rpcURL)
+func NewLiquidationBot(config *Config) (*LiquidationBot, error) {
+	client, err := ethclient.Dial(config.RPCURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Ethereum client: %v", err)
 	}
 
-	privateKey, err := crypto.HexToECDSA(privateKeyHex)
+	privateKey, err := crypto.HexToECDSA(config.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("invalid private key: %v", err)
+	}
+
+	cauldronABI, err := parseABI(constants.CauldronABI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse cauldron ABI: %v", err)
 	}
 
 	chainID, err := client.NetworkID(context.Background())
@@ -103,7 +171,7 @@ func NewLiquidationBot(rpcURL, cauldronAddress, privateKeyHex string, cauldronAB
 		return nil, fmt.Errorf("failed to create transactor: %v", err)
 	}
 
-	cauldronAddr := common.HexToAddress(cauldronAddress)
+	cauldronAddr := common.HexToAddress(config.CauldronAddress)
 	cauldron := bind.NewBoundContract(cauldronAddr, cauldronABI, client, client, client)
 
 	return &LiquidationBot{
@@ -113,7 +181,7 @@ func NewLiquidationBot(rpcURL, cauldronAddress, privateKeyHex string, cauldronAB
 		privateKey:      privateKey,
 		auth:            auth,
 		cauldron:        cauldron,
-		checkInterval:   10 * time.Second,
+		checkInterval:   config.CheckInterval,
 		stopChan:        make(chan struct{}),
 	}, nil
 }
@@ -273,9 +341,9 @@ func (lb *LiquidationBot) getAllBorrowers() ([]common.Address, error) {
 	}
 
 	// Query LogBorrow events from the last 10k blocks
-	fromBlock := latestBlock - 10000
-	if fromBlock < 0 {
-		fromBlock = 0
+	fromBlock := uint64(0)
+	if latestBlock >= 10000 {
+		fromBlock = latestBlock - 10000
 	}
 
 	query := ethereum.FilterQuery{
@@ -346,13 +414,18 @@ func (lb *LiquidationBot) GetPositionInfo(userAddress common.Address) (*UserPosi
 }
 
 // NewLiquidationMonitor creates a new liquidation monitor
-func NewLiquidationMonitor(rpcURL, cauldronAddress string, cauldronABI abi.ABI) (*LiquidationMonitor, error) {
-	client, err := ethclient.Dial(rpcURL)
+func NewLiquidationMonitor(config *Config) (*LiquidationMonitor, error) {
+	client, err := ethclient.Dial(config.RPCURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Ethereum client: %v", err)
 	}
 
-	cauldronAddr := common.HexToAddress(cauldronAddress)
+	cauldronABI, err := parseABI(constants.CauldronABI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse cauldron ABI: %v", err)
+	}
+
+	cauldronAddr := common.HexToAddress(config.CauldronAddress)
 	cauldron := bind.NewBoundContract(cauldronAddr, cauldronABI, client, client, client)
 
 	return &LiquidationMonitor{
@@ -541,23 +614,27 @@ func (lm *LiquidationMonitor) handleRecentLiquidations(c echo.Context) error {
 }
 
 func main() {
-	// Configuration - you would typically load these from environment variables or config file
-	const (
-		rpcURL          = "YOUR_RPC_URL"
-		cauldronAddress = "YOUR_CAULDRON_ADDRESS"
-		privateKeyHex   = "YOUR_PRIVATE_KEY"
-	)
+	// Load configuration
+	config, err := LoadConfig()
+	if err != nil {
+		log.Fatal("Failed to load configuration:", err)
+	}
 
-	// You would need to load the actual ABI from a file or constant
-	cauldronABI := abi.ABI{} // Load your cauldron ABI here
+	// Set log level
+	if config.LogLevel == "debug" {
+		log.SetFlags(log.LstdFlags | log.Lshortfile)
+	}
+
+	log.Printf("Starting liquidation bot with config: RPC=%s, Cauldron=%s, Port=%s",
+		config.RPCURL, config.CauldronAddress, config.Port)
 
 	// Initialize bot and monitor
-	bot, err := NewLiquidationBot(rpcURL, cauldronAddress, privateKeyHex, cauldronABI)
+	bot, err := NewLiquidationBot(config)
 	if err != nil {
 		log.Fatal("Failed to create liquidation bot:", err)
 	}
 
-	monitor, err := NewLiquidationMonitor(rpcURL, cauldronAddress, cauldronABI)
+	monitor, err := NewLiquidationMonitor(config)
 	if err != nil {
 		log.Fatal("Failed to create liquidation monitor:", err)
 	}
@@ -590,8 +667,8 @@ func main() {
 	})
 
 	// Start server
-	log.Println("Starting server on :8080")
-	if err := e.Start(":8080"); err != nil {
+	log.Printf("Starting server on :%s", config.Port)
+	if err := e.Start(":" + config.Port); err != nil {
 		log.Fatal("Server failed to start:", err)
 	}
 }
