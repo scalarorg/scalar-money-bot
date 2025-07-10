@@ -1,21 +1,34 @@
-ARG GO_VERSION=1.22.2
+FROM golang:1.21-alpine AS builder
 
-# Builder stage
-FROM golang:${GO_VERSION} as builder
 WORKDIR /app
 
-COPY . .
+# Install dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Copy go mod files
+COPY go.mod go.sum ./
 RUN go mod download
-RUN go build -o dist/main main.go
 
-# Use the scratch image as the base image for a small and secure image
-FROM debian:12.5-slim
-WORKDIR /app
+# Copy source code
+COPY . .
 
-COPY --from=builder /app/dist/ .
+# Build the application
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./cmd/bot
 
-ENV PORT=12345
-EXPOSE $PORT
-ENV GIN_MODE=release
+# Final stage
+FROM alpine:latest
 
-CMD ["/app/main"]
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /root/
+
+# Copy the binary from builder stage
+COPY --from=builder /app/main .
+
+# Create logs directory
+RUN mkdir -p logs
+
+# Expose port
+EXPOSE 8080
+
+# Command to run
+CMD ["./main"]
