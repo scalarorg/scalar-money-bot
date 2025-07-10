@@ -131,36 +131,6 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 
-	// Create composite indexes that GORM can't handle via tags
-	if err := createCompositeIndexes(db); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// createCompositeIndexes creates composite indexes that require raw SQL
-func createCompositeIndexes(db *gorm.DB) error {
-	indexes := []string{
-		// Composite index for user positions by user and created_at
-		`CREATE INDEX IF NOT EXISTS idx_user_positions_user_created_at ON user_positions(user_address, created_at DESC)`,
-
-		// Composite index for liquidation events by user and block number
-		`CREATE INDEX IF NOT EXISTS idx_liquidation_events_user_block ON liquidation_events(user_address, block_number DESC)`,
-
-		// Composite index for bot logs by level and created_at
-		`CREATE INDEX IF NOT EXISTS idx_bot_logs_level_created_at ON bot_logs(level, created_at DESC)`,
-
-		// Partial index for insolvent positions only
-		`CREATE INDEX IF NOT EXISTS idx_user_positions_insolvent ON user_positions(user_address, created_at DESC) WHERE is_insolvent = true`,
-	}
-
-	for _, indexSQL := range indexes {
-		if err := db.Exec(indexSQL).Error; err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 

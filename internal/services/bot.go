@@ -45,6 +45,8 @@ func NewLiquidationBot(cfg *config.Config, db *gorm.DB) (*LiquidationBot, error)
 		return nil, fmt.Errorf("failed to connect to EVM client: %v", err)
 	}
 
+	fmt.Printf("config: %+v\n", cfg)
+
 	privateKey, err := crypto.HexToECDSA(cfg.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("invalid private key: %v", err)
