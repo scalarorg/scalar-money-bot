@@ -29,7 +29,7 @@ const (
 	CheckpointLiquidations = "liquidations"
 
 	// Default number of blocks to look back if no checkpoint exists
-	DefaultLookbackBlocks = 10000
+	DefaultLookbackBlocks = 500
 )
 
 // LiquidationBot represents the main liquidation bot
@@ -543,6 +543,18 @@ func (lb *LiquidationBot) ResetCheckpoint(name string, blockNumber uint64) error
 // GetContractDeploymentBlock returns the cached deployment block
 func (lb *LiquidationBot) GetContractDeploymentBlock() (uint64, error) {
 	return lb.getContractDeploymentBlock()
+}
+
+func (lb *LiquidationBot) GetStatus() *models.BotStatus {
+	status := &models.BotStatus{
+		IsRunning:     lb.isRunning,
+		CheckInterval: lb.checkInterval.String(),
+		LastCheck:     time.Now(),
+	}
+
+	lb.db.Create(status)
+
+	return status
 }
 
 // LogOperation exposes the internal logOperation method for handlers

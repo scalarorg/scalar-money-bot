@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"net/http"
-	"scalar-money-bot/internal/models"
 	"scalar-money-bot/internal/services"
 	"strconv"
 	"time"
@@ -72,11 +71,7 @@ func (h *Handlers) handleStop(c echo.Context) error {
 }
 
 func (h *Handlers) handleStatus(c echo.Context) error {
-	status := &models.BotStatus{
-		IsRunning:     h.bot.IsRunning(),
-		CheckInterval: h.bot.GetCheckInterval().String(),
-		LastCheck:     time.Now(),
-	}
+	status := h.bot.GetStatus()
 	return c.JSON(http.StatusOK, status)
 }
 
