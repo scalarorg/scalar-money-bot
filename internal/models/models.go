@@ -89,6 +89,21 @@ func (BotLog) TableName() string {
 	return "bot_logs"
 }
 
+// ProcessingCheckpoint represents the last processed block for different operations
+type ProcessingCheckpoint struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Name        string    `gorm:"uniqueIndex:idx_processing_checkpoints_name;size:50;not null" json:"name"`
+	BlockNumber uint64    `gorm:"not null" json:"blockNumber"`
+	TxHash      string    `gorm:"size:66" json:"txHash,omitempty"`
+	CreatedAt   time.Time `gorm:"index:idx_processing_checkpoints_created_at" json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+// TableName returns the table name for ProcessingCheckpoint
+func (ProcessingCheckpoint) TableName() string {
+	return "processing_checkpoints"
+}
+
 // BeforeCreate hook for BotLog to set CreatedAt
 func (b *BotLog) BeforeCreate(tx *gorm.DB) error {
 	if b.CreatedAt.IsZero() {
@@ -113,6 +128,14 @@ func (s *SystemHealth) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+// BeforeCreate hook for ProcessingCheckpoint to set CreatedAt
+func (p *ProcessingCheckpoint) BeforeCreate(tx *gorm.DB) error {
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now()
+	}
+	return nil
+}
+
 // AutoMigrate runs database migrations
 func AutoMigrate(db *gorm.DB) error {
 	// Create extensions first
@@ -127,6 +150,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&SystemHealth{},
 		&BotLog{},
 		&BotStatus{},
+		&ProcessingCheckpoint{},
 	); err != nil {
 		return err
 	}
@@ -249,4 +273,66 @@ func (r *BotLogRepository) FindLogsByLevel(level string, limit, offset int) ([]B
 func (r *BotLogRepository) CleanupOldLogs(olderThan time.Duration) error {
 	cutoffTime := time.Now().Add(-olderThan)
 	return r.db.Where("created_at < ?", cutoffTime).Delete(&BotLog{}).Error
+}
+
+// ProcessingCheckpointRepository handles checkpoint operations
+type ProcessingCheckpointRepository struct {
+	db *gorm.DB
+}
+
+func NewProcessingCheckpointRepository(db *gorm.DB) *ProcessingCheckpointRepository {
+	return &ProcessingCheckpointRepository{db: db}
+}
+
+// GetCheckpoint retrieves the last processed block for a specific operation
+func (r *ProcessingCheckpointRepository) GetCheckpoint(name string) (*ProcessingCheckpoint, error) {
+	var checkpoint ProcessingCheckpoint
+	err := r.db.Where("name = ?", name).First(&checkpoint).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, nil // No checkpoint found
+	}
+	return &checkpoint, err
+}
+
+// UpdateCheckpoint updates the checkpoint for a specific operation
+func (r *ProcessingCheckpointRepository) UpdateCheckpoint(name string, blockNumber uint64, txHash string) error {
+	checkpoint := &ProcessingCheckpoint{
+		Name:        name,
+		BlockNumber: blockNumber,
+		TxHash:      txHash,
+	}
+
+	// Use GORM's Save method which will create or update based on unique constraint
+	return r.db.Save(checkpoint).Error
+}
+
+// SetCheckpointIfNotExists creates a checkpoint only if it doesn't exist
+func (r *ProcessingCheckpointRepository) SetCheckpointIfNotExists(name string, blockNumber uint64) error {
+	var count int64
+	err := r.db.Model(&ProcessingCheckpoint{}).Where("name = ?", name).Count(&count).Error
+	if err != nil {
+		return err
+	}
+
+	if count == 0 {
+		checkpoint := &ProcessingCheckpoint{
+			Name:        name,
+			BlockNumber: blockNumber,
+		}
+		return r.db.Create(checkpoint).Error
+	}
+
+	return nil // Checkpoint already exists
+}
+
+// DeleteCheckpoint removes a checkpoint
+func (r *ProcessingCheckpointRepository) DeleteCheckpoint(name string) error {
+	return r.db.Where("name = ?", name).Delete(&ProcessingCheckpoint{}).Error
+}
+
+// GetAllCheckpoints retrieves all checkpoints
+func (r *ProcessingCheckpointRepository) GetAllCheckpoints() ([]ProcessingCheckpoint, error) {
+	var checkpoints []ProcessingCheckpoint
+	err := r.db.Order("name").Find(&checkpoints).Error
+	return checkpoints, err
 }

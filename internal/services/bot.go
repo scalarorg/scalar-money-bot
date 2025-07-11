@@ -23,19 +23,30 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	// Checkpoint names for different operations
+	CheckpointBorrowEvents = "borrow_events"
+	CheckpointLiquidations = "liquidations"
+
+	// Default number of blocks to look back if no checkpoint exists
+	DefaultLookbackBlocks = 10000
+)
+
 // LiquidationBot represents the main liquidation bot
 type LiquidationBot struct {
-	client          *ethclient.Client
-	cauldronAddress common.Address
-	cauldronABI     abi.ABI
-	privateKey      *ecdsa.PrivateKey
-	auth            *bind.TransactOpts
-	cauldron        *bind.BoundContract
-	isRunning       bool
-	checkInterval   time.Duration
-	mutex           sync.RWMutex
-	stopChan        chan struct{}
-	db              *gorm.DB
+	client              *ethclient.Client
+	cauldronAddress     common.Address
+	cauldronABI         abi.ABI
+	privateKey          *ecdsa.PrivateKey
+	auth                *bind.TransactOpts
+	cauldron            *bind.BoundContract
+	isRunning           bool
+	checkInterval       time.Duration
+	mutex               sync.RWMutex
+	stopChan            chan struct{}
+	db                  *gorm.DB
+	checkpointRepo      *models.ProcessingCheckpointRepository
+	contractDeployBlock uint64 // Block number when contract was deployed
 }
 
 // NewLiquidationBot creates a new liquidation bot instance
@@ -70,7 +81,7 @@ func NewLiquidationBot(cfg *config.Config, db *gorm.DB) (*LiquidationBot, error)
 	cauldronAddr := common.HexToAddress(cfg.CauldronAddress)
 	cauldron := bind.NewBoundContract(cauldronAddr, cauldronABI, client, client, client)
 
-	return &LiquidationBot{
+	lb := &LiquidationBot{
 		client:          client,
 		cauldronAddress: cauldronAddr,
 		cauldronABI:     cauldronABI,
@@ -80,7 +91,134 @@ func NewLiquidationBot(cfg *config.Config, db *gorm.DB) (*LiquidationBot, error)
 		checkInterval:   cfg.CheckInterval,
 		stopChan:        make(chan struct{}),
 		db:              db,
-	}, nil
+		checkpointRepo:  models.NewProcessingCheckpointRepository(db),
+	}
+
+	// Get contract deployment block automatically
+	contractDeployBlock, err := lb.getContractDeploymentBlock()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get contract deployment block: %v", err)
+	}
+	lb.contractDeployBlock = contractDeployBlock
+
+	// Initialize checkpoints if they don't exist
+	if err := lb.initializeCheckpoints(); err != nil {
+		return nil, fmt.Errorf("failed to initialize checkpoints: %v", err)
+	}
+
+	return lb, nil
+}
+
+// getContractDeploymentBlock finds the block where the contract was deployed
+func (lb *LiquidationBot) getContractDeploymentBlock() (uint64, error) {
+	// Check if we have a cached deployment block in checkpoints
+	checkpoint, err := lb.checkpointRepo.GetCheckpoint("contract_deployment")
+	if err == nil && checkpoint != nil {
+		lb.logOperation("info", fmt.Sprintf("Using cached contract deployment block: %d", checkpoint.BlockNumber))
+		return checkpoint.BlockNumber, nil
+	}
+
+	lb.logOperation("info", "Detecting contract deployment block...")
+
+	// Get contract code to verify it exists
+	code, err := lb.client.CodeAt(context.Background(), lb.cauldronAddress, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get contract code: %v", err)
+	}
+	if len(code) == 0 {
+		return 0, fmt.Errorf("no contract found at address %s", lb.cauldronAddress.Hex())
+	}
+
+	// Binary search to find the deployment block
+	currentBlock, err := lb.client.BlockNumber(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("failed to get current block: %v", err)
+	}
+
+	deploymentBlock, err := lb.binarySearchDeploymentBlock(0, currentBlock)
+	if err != nil {
+		return 0, fmt.Errorf("failed to find deployment block: %v", err)
+	}
+
+	// Cache the deployment block for future use
+	err = lb.checkpointRepo.UpdateCheckpoint("contract_deployment", deploymentBlock, "")
+	if err != nil {
+		lb.logOperation("error", fmt.Sprintf("Failed to cache deployment block: %v", err))
+	}
+
+	lb.logOperation("info", fmt.Sprintf("Contract deployment block detected: %d", deploymentBlock))
+	return deploymentBlock, nil
+}
+
+// binarySearchDeploymentBlock uses binary search to find the deployment block
+func (lb *LiquidationBot) binarySearchDeploymentBlock(low, high uint64) (uint64, error) {
+	for low < high {
+		mid := (low + high) / 2
+
+		// Check if contract exists at this block
+		code, err := lb.client.CodeAt(context.Background(), lb.cauldronAddress, big.NewInt(int64(mid)))
+		if err != nil {
+			return 0, fmt.Errorf("failed to check code at block %d: %v", mid, err)
+		}
+
+		if len(code) > 0 {
+			// Contract exists, search in the lower half
+			high = mid
+		} else {
+			// Contract doesn't exist, search in the upper half
+			low = mid + 1
+		}
+
+		// Add a small delay to avoid overwhelming the RPC
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Verify the found block
+	code, err := lb.client.CodeAt(context.Background(), lb.cauldronAddress, big.NewInt(int64(low)))
+	if err != nil {
+		return 0, fmt.Errorf("failed to verify deployment block %d: %v", low, err)
+	}
+	if len(code) == 0 {
+		return 0, fmt.Errorf("contract not found at calculated deployment block %d", low)
+	}
+
+	return low, nil
+}
+
+func (lb *LiquidationBot) initializeCheckpoints() error {
+	// Get current block number
+	currentBlock, err := lb.client.BlockNumber(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to get current block: %v", err)
+	}
+
+	// Determine starting block
+	var startBlock uint64
+	if lb.contractDeployBlock > 0 {
+		startBlock = lb.contractDeployBlock
+	} else {
+		// Default to current block minus default lookback
+		if currentBlock >= DefaultLookbackBlocks {
+			startBlock = currentBlock - DefaultLookbackBlocks
+		} else {
+			startBlock = 0
+		}
+	}
+
+	// Initialize borrow events checkpoint
+	err = lb.checkpointRepo.SetCheckpointIfNotExists(CheckpointBorrowEvents, startBlock)
+	if err != nil {
+		return fmt.Errorf("failed to set borrow events checkpoint: %v", err)
+	}
+
+	// Initialize liquidations checkpoint
+	err = lb.checkpointRepo.SetCheckpointIfNotExists(CheckpointLiquidations, startBlock)
+	if err != nil {
+		return fmt.Errorf("failed to set liquidations checkpoint: %v", err)
+	}
+
+	lb.logOperation("info", fmt.Sprintf("Initialized checkpoints with start block: %d", startBlock))
+	return nil
 }
 
 // Start begins the liquidation bot
@@ -234,7 +372,7 @@ func (lb *LiquidationBot) liquidateUsers(users []common.Address) error {
 	return nil
 }
 
-// getAllBorrowers retrieves all borrowers from events
+// getAllBorrowers retrieves all borrowers from events using checkpoints
 func (lb *LiquidationBot) getAllBorrowers() ([]common.Address, error) {
 	// Get the latest block
 	latestBlock, err := lb.client.BlockNumber(context.Background())
@@ -242,12 +380,33 @@ func (lb *LiquidationBot) getAllBorrowers() ([]common.Address, error) {
 		return nil, fmt.Errorf("failed to get latest block: %v", err)
 	}
 
-	// Query LogBorrow events from the last 10k blocks
-	fromBlock := uint64(0)
-	if latestBlock >= 10000 {
-		fromBlock = latestBlock - 10000
+	// Get last processed block from checkpoint
+	checkpoint, err := lb.checkpointRepo.GetCheckpoint(CheckpointBorrowEvents)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get borrow events checkpoint: %v", err)
 	}
 
+	var fromBlock uint64
+	if checkpoint != nil {
+		fromBlock = checkpoint.BlockNumber + 1 // Start from next block after last processed
+	} else {
+		// This shouldn't happen if initialization worked correctly
+		if latestBlock >= DefaultLookbackBlocks {
+			fromBlock = latestBlock - DefaultLookbackBlocks
+		} else {
+			fromBlock = 0
+		}
+	}
+
+	// Don't query if we're already up to date
+	if fromBlock > latestBlock {
+		lb.logOperation("info", "No new blocks to process for borrow events")
+		return lb.getCachedBorrowers(), nil
+	}
+
+	lb.logOperation("info", fmt.Sprintf("Processing borrow events from block %d to %d", fromBlock, latestBlock))
+
+	// Query LogBorrow events
 	query := ethereum.FilterQuery{
 		FromBlock: big.NewInt(int64(fromBlock)),
 		ToBlock:   big.NewInt(int64(latestBlock)),
@@ -267,12 +426,36 @@ func (lb *LiquidationBot) getAllBorrowers() ([]common.Address, error) {
 		}
 	}
 
-	var users []common.Address
-	for user := range userSet {
-		users = append(users, user)
+	// Update checkpoint
+	err = lb.checkpointRepo.UpdateCheckpoint(CheckpointBorrowEvents, latestBlock, "")
+	if err != nil {
+		lb.logOperation("error", fmt.Sprintf("Failed to update borrow events checkpoint: %v", err))
 	}
 
-	return users, nil
+	// Get all unique borrowers (including previously cached ones)
+	allBorrowers := lb.getCachedBorrowers()
+	for user := range userSet {
+		found := false
+		for _, existing := range allBorrowers {
+			if existing == user {
+				found = true
+				break
+			}
+		}
+		if !found {
+			allBorrowers = append(allBorrowers, user)
+		}
+	}
+
+	lb.logOperation("info", fmt.Sprintf("Found %d total borrowers (%d new from recent events)", len(allBorrowers), len(userSet)))
+	return allBorrowers, nil
+}
+
+// getCachedBorrowers gets borrowers from historical data (you might want to cache this)
+func (lb *LiquidationBot) getCachedBorrowers() []common.Address {
+	// For now, return empty slice. You might want to implement caching
+	// or query from a separate table that stores all known borrowers
+	return []common.Address{}
 }
 
 // GetPositionInfo retrieves position information for a user
@@ -327,7 +510,45 @@ func (lb *LiquidationBot) GetPositionInfo(userAddress common.Address) (*models.U
 	return position, nil
 }
 
-// logOperation logs bot operations to database
+// GetCheckpointStatus returns the current checkpoint status
+func (lb *LiquidationBot) GetCheckpointStatus() (map[string]*models.ProcessingCheckpoint, error) {
+	checkpoints, err := lb.checkpointRepo.GetAllCheckpoints()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get checkpoints: %v", err)
+	}
+
+	result := make(map[string]*models.ProcessingCheckpoint)
+	for i := range checkpoints {
+		result[checkpoints[i].Name] = &checkpoints[i]
+	}
+
+	return result, nil
+}
+
+// ResetCheckpoint resets a specific checkpoint to a given block number
+func (lb *LiquidationBot) ResetCheckpoint(name string, blockNumber uint64) error {
+	if lb.isRunning {
+		return fmt.Errorf("cannot reset checkpoint while bot is running")
+	}
+
+	err := lb.checkpointRepo.UpdateCheckpoint(name, blockNumber, "")
+	if err != nil {
+		return fmt.Errorf("failed to reset checkpoint %s: %v", name, err)
+	}
+
+	lb.logOperation("info", fmt.Sprintf("Reset checkpoint %s to block %d", name, blockNumber))
+	return nil
+}
+
+// GetContractDeploymentBlock returns the cached deployment block
+func (lb *LiquidationBot) GetContractDeploymentBlock() (uint64, error) {
+	return lb.getContractDeploymentBlock()
+}
+
+// LogOperation exposes the internal logOperation method for handlers
+func (lb *LiquidationBot) LogOperation(level, message string) {
+	lb.logOperation(level, message)
+}
 func (lb *LiquidationBot) logOperation(level, message string) {
 	log.Printf("[%s] %s", level, message)
 
