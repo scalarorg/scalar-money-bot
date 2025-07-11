@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"gorm.io/gorm"
@@ -30,6 +31,9 @@ const (
 
 	// Default number of blocks to look back if no checkpoint exists
 	DefaultLookbackBlocks = 500
+	
+	// Maximum block range for eth_getLogs to avoid RPC limits
+	MaxBlockRange = 9000
 )
 
 // LiquidationBot represents the main liquidation bot
@@ -406,15 +410,8 @@ func (lb *LiquidationBot) getAllBorrowers() ([]common.Address, error) {
 
 	lb.logOperation("info", fmt.Sprintf("Processing borrow events from block %d to %d", fromBlock, latestBlock))
 
-	// Query LogBorrow events
-	query := ethereum.FilterQuery{
-		FromBlock: big.NewInt(int64(fromBlock)),
-		ToBlock:   big.NewInt(int64(latestBlock)),
-		Addresses: []common.Address{lb.cauldronAddress},
-		Topics:    [][]common.Hash{{crypto.Keccak256Hash([]byte("LogBorrow(address,address,uint256,uint256)"))}},
-	}
-
-	logs, err := lb.client.FilterLogs(context.Background(), query)
+	// Query LogBorrow events in chunks to handle RPC limits
+	logs, err := lb.queryLogsInChunks(fromBlock, latestBlock)
 	if err != nil {
 		return nil, fmt.Errorf("failed to filter logs: %v", err)
 	}
@@ -449,6 +446,92 @@ func (lb *LiquidationBot) getAllBorrowers() ([]common.Address, error) {
 
 	lb.logOperation("info", fmt.Sprintf("Found %d total borrowers (%d new from recent events)", len(allBorrowers), len(userSet)))
 	return allBorrowers, nil
+}
+
+// queryLogsInChunks queries logs in chunks to handle RPC block range limits
+func (lb *LiquidationBot) queryLogsInChunks(fromBlock, toBlock uint64) ([]types.Log, error) {
+	var allLogs []types.Log
+	
+	for currentBlock := fromBlock; currentBlock <= toBlock; {
+		endBlock := currentBlock + MaxBlockRange - 1
+		if endBlock > toBlock {
+			endBlock = toBlock
+		}
+		
+		lb.logOperation("info", fmt.Sprintf("Querying logs from block %d to %d", currentBlock, endBlock))
+		
+		query := ethereum.FilterQuery{
+			FromBlock: big.NewInt(int64(currentBlock)),
+			ToBlock:   big.NewInt(int64(endBlock)),
+			Addresses: []common.Address{lb.cauldronAddress},
+			Topics:    [][]common.Hash{{crypto.Keccak256Hash([]byte("LogBorrow(address,address,uint256,uint256)"))}},
+		}
+		
+		logs, err := lb.queryLogsWithRetry(query, currentBlock, endBlock)
+		if err != nil {
+			return nil, fmt.Errorf("failed to filter logs for blocks %d-%d: %v", currentBlock, endBlock, err)
+		}
+		
+		allLogs = append(allLogs, logs...)
+		currentBlock = endBlock + 1
+		
+		// Add a small delay to avoid overwhelming the RPC
+		time.Sleep(100 * time.Millisecond)
+	}
+	
+	return allLogs, nil
+}
+
+// queryLogsWithRetry queries logs with exponential backoff retry logic
+func (lb *LiquidationBot) queryLogsWithRetry(query ethereum.FilterQuery, fromBlock, toBlock uint64) ([]types.Log, error) {
+	const maxRetries = 3
+	const baseDelay = 1 * time.Second
+	
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		logs, err := lb.client.FilterLogs(context.Background(), query)
+		if err == nil {
+			return logs, nil
+		}
+		
+		// Check if this is a block range error that might require smaller chunks
+		if strings.Contains(err.Error(), "10,000 range") || strings.Contains(err.Error(), "Request Entity Too Large") {
+			// If we're already at minimum chunk size, return the error
+			if toBlock-fromBlock < 1000 {
+				return nil, fmt.Errorf("block range too large even for minimum chunk size: %v", err)
+			}
+			
+			// Split the range in half and retry
+			lb.logOperation("info", fmt.Sprintf("Block range too large, splitting range %d-%d", fromBlock, toBlock))
+			midBlock := (fromBlock + toBlock) / 2
+			
+			// Query first half
+			query1 := query
+			query1.ToBlock = big.NewInt(int64(midBlock))
+			logs1, err1 := lb.queryLogsWithRetry(query1, fromBlock, midBlock)
+			if err1 != nil {
+				return nil, err1
+			}
+			
+			// Query second half
+			query2 := query
+			query2.FromBlock = big.NewInt(int64(midBlock + 1))
+			logs2, err2 := lb.queryLogsWithRetry(query2, midBlock+1, toBlock)
+			if err2 != nil {
+				return nil, err2
+			}
+			
+			return append(logs1, logs2...), nil
+		}
+		
+		// For other errors, retry with exponential backoff
+		if attempt < maxRetries-1 {
+			delay := baseDelay * time.Duration(1<<uint(attempt))
+			lb.logOperation("info", fmt.Sprintf("Retrying log query in %v (attempt %d/%d): %v", delay, attempt+1, maxRetries, err))
+			time.Sleep(delay)
+		}
+	}
+	
+	return nil, fmt.Errorf("failed to query logs after %d attempts", maxRetries)
 }
 
 // getCachedBorrowers gets borrowers from historical data (you might want to cache this)

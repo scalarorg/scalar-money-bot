@@ -92,7 +92,7 @@ func (BotLog) TableName() string {
 // ProcessingCheckpoint represents the last processed block for different operations
 type ProcessingCheckpoint struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
-	Name        string    `gorm:"uniqueIndex:idx_processing_checkpoints_name;size:50;not null" json:"name"`
+	Name        string    `gorm:"uniqueIndex:idx_processing_checkpoints_name;size:50;not null;constraint:OnConflict:REPLACE" json:"name"`
 	BlockNumber uint64    `gorm:"not null" json:"blockNumber"`
 	TxHash      string    `gorm:"size:66" json:"txHash,omitempty"`
 	CreatedAt   time.Time `gorm:"index:idx_processing_checkpoints_created_at" json:"createdAt"`
