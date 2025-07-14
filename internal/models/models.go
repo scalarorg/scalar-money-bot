@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"time"
 
 	"gorm.io/gorm"
@@ -159,16 +160,20 @@ func AutoMigrate(db *gorm.DB) error {
 }
 
 // Repository methods for common queries
-type UserPositionRepository struct {
+type Repository struct {
 	db *gorm.DB
 }
 
-func NewUserPositionRepository(db *gorm.DB) *UserPositionRepository {
-	return &UserPositionRepository{db: db}
+func NewRepository(db *gorm.DB) *Repository {
+	return &Repository{db: db}
+}
+
+func (r *Repository) Create(ctx context.Context, obj interface{}) *gorm.DB {
+	return r.db.WithContext(ctx).Create(obj)
 }
 
 // FindInsolventPositions finds all insolvent positions
-func (r *UserPositionRepository) FindInsolventPositions() ([]UserPosition, error) {
+func (r *Repository) FindInsolventPositions() ([]UserPosition, error) {
 	var positions []UserPosition
 	err := r.db.Where("is_insolvent = ?", true).
 		Order("created_at DESC").
@@ -177,7 +182,7 @@ func (r *UserPositionRepository) FindInsolventPositions() ([]UserPosition, error
 }
 
 // FindPositionsByUser finds all positions for a specific user
-func (r *UserPositionRepository) FindPositionsByUser(userAddress string) ([]UserPosition, error) {
+func (r *Repository) FindPositionsByUser(userAddress string) ([]UserPosition, error) {
 	var positions []UserPosition
 	err := r.db.Where("user_address = ?", userAddress).
 		Order("created_at DESC").
@@ -186,7 +191,7 @@ func (r *UserPositionRepository) FindPositionsByUser(userAddress string) ([]User
 }
 
 // UpsertPosition creates or updates a user position
-func (r *UserPositionRepository) UpsertPosition(position *UserPosition) error {
+func (r *Repository) UpsertPosition(position *UserPosition) error {
 	// Try to find existing position first
 	var existing UserPosition
 	err := r.db.Where("user_address = ?", position.User).First(&existing).Error
@@ -204,17 +209,8 @@ func (r *UserPositionRepository) UpsertPosition(position *UserPosition) error {
 	return r.db.Save(position).Error
 }
 
-// LiquidationEventRepository handles liquidation event operations
-type LiquidationEventRepository struct {
-	db *gorm.DB
-}
-
-func NewLiquidationEventRepository(db *gorm.DB) *LiquidationEventRepository {
-	return &LiquidationEventRepository{db: db}
-}
-
 // CreateEvent creates a new liquidation event (with duplicate check)
-func (r *LiquidationEventRepository) CreateEvent(event *LiquidationEvent) error {
+func (r *Repository) CreateEvent(event *LiquidationEvent) error {
 	// Check if event already exists
 	var existing LiquidationEvent
 	err := r.db.Where("tx_hash = ?", event.TxHash).First(&existing).Error
@@ -231,7 +227,7 @@ func (r *LiquidationEventRepository) CreateEvent(event *LiquidationEvent) error 
 }
 
 // FindEventsByUser finds liquidation events for a specific user
-func (r *LiquidationEventRepository) FindEventsByUser(userAddress string) ([]LiquidationEvent, error) {
+func (r *Repository) FindEventsByUser(userAddress string) ([]LiquidationEvent, error) {
 	var events []LiquidationEvent
 	err := r.db.Where("user_address = ?", userAddress).
 		Order("block_number DESC").
@@ -239,17 +235,8 @@ func (r *LiquidationEventRepository) FindEventsByUser(userAddress string) ([]Liq
 	return events, err
 }
 
-// BotLogRepository handles bot log operations
-type BotLogRepository struct {
-	db *gorm.DB
-}
-
-func NewBotLogRepository(db *gorm.DB) *BotLogRepository {
-	return &BotLogRepository{db: db}
-}
-
 // CreateLog creates a new bot log entry
-func (r *BotLogRepository) CreateLog(level, message, data string) error {
+func (r *Repository) CreateLog(level, message, data string) error {
 	log := &BotLog{
 		Level:   level,
 		Message: message,
@@ -259,7 +246,7 @@ func (r *BotLogRepository) CreateLog(level, message, data string) error {
 }
 
 // FindLogsByLevel finds logs by level with pagination
-func (r *BotLogRepository) FindLogsByLevel(level string, limit, offset int) ([]BotLog, error) {
+func (r *Repository) FindLogsByLevel(level string, limit, offset int) ([]BotLog, error) {
 	var logs []BotLog
 	err := r.db.Where("level = ?", level).
 		Order("created_at DESC").
@@ -270,22 +257,13 @@ func (r *BotLogRepository) FindLogsByLevel(level string, limit, offset int) ([]B
 }
 
 // CleanupOldLogs removes logs older than specified duration
-func (r *BotLogRepository) CleanupOldLogs(olderThan time.Duration) error {
+func (r *Repository) CleanupOldLogs(olderThan time.Duration) error {
 	cutoffTime := time.Now().Add(-olderThan)
 	return r.db.Where("created_at < ?", cutoffTime).Delete(&BotLog{}).Error
 }
 
-// ProcessingCheckpointRepository handles checkpoint operations
-type ProcessingCheckpointRepository struct {
-	db *gorm.DB
-}
-
-func NewProcessingCheckpointRepository(db *gorm.DB) *ProcessingCheckpointRepository {
-	return &ProcessingCheckpointRepository{db: db}
-}
-
 // GetCheckpoint retrieves the last processed block for a specific operation
-func (r *ProcessingCheckpointRepository) GetCheckpoint(name string) (*ProcessingCheckpoint, error) {
+func (r *Repository) GetCheckpoint(name string) (*ProcessingCheckpoint, error) {
 	var checkpoint ProcessingCheckpoint
 	err := r.db.Where("name = ?", name).First(&checkpoint).Error
 	if err == gorm.ErrRecordNotFound {
@@ -295,7 +273,7 @@ func (r *ProcessingCheckpointRepository) GetCheckpoint(name string) (*Processing
 }
 
 // UpdateCheckpoint updates the checkpoint for a specific operation
-func (r *ProcessingCheckpointRepository) UpdateCheckpoint(name string, blockNumber uint64, txHash string) error {
+func (r *Repository) UpdateCheckpoint(name string, blockNumber uint64, txHash string) error {
 	checkpoint := &ProcessingCheckpoint{
 		Name:        name,
 		BlockNumber: blockNumber,
@@ -307,7 +285,7 @@ func (r *ProcessingCheckpointRepository) UpdateCheckpoint(name string, blockNumb
 }
 
 // SetCheckpointIfNotExists creates a checkpoint only if it doesn't exist
-func (r *ProcessingCheckpointRepository) SetCheckpointIfNotExists(name string, blockNumber uint64) error {
+func (r *Repository) SetCheckpointIfNotExists(name string, blockNumber uint64) error {
 	var count int64
 	err := r.db.Model(&ProcessingCheckpoint{}).Where("name = ?", name).Count(&count).Error
 	if err != nil {
@@ -326,12 +304,12 @@ func (r *ProcessingCheckpointRepository) SetCheckpointIfNotExists(name string, b
 }
 
 // DeleteCheckpoint removes a checkpoint
-func (r *ProcessingCheckpointRepository) DeleteCheckpoint(name string) error {
+func (r *Repository) DeleteCheckpoint(name string) error {
 	return r.db.Where("name = ?", name).Delete(&ProcessingCheckpoint{}).Error
 }
 
 // GetAllCheckpoints retrieves all checkpoints
-func (r *ProcessingCheckpointRepository) GetAllCheckpoints() ([]ProcessingCheckpoint, error) {
+func (r *Repository) GetAllCheckpoints() ([]ProcessingCheckpoint, error) {
 	var checkpoints []ProcessingCheckpoint
 	err := r.db.Order("name").Find(&checkpoints).Error
 	return checkpoints, err

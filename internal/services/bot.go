@@ -21,17 +21,17 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"gorm.io/gorm"
 )
 
 const (
 	// Checkpoint names for different operations
-	CheckpointBorrowEvents = "borrow_events"
-	CheckpointLiquidations = "liquidations"
+	CheckpointBorrowEvents        = "borrow_events"
+	CheckpointLiquidations        = "liquidations"
+	CheckpointContractDeployments = "contract_deployments"
 
 	// Default number of blocks to look back if no checkpoint exists
 	DefaultLookbackBlocks = 500
-	
+
 	// Maximum block range for eth_getLogs to avoid RPC limits
 	MaxBlockRange = 9000
 )
@@ -48,14 +48,13 @@ type LiquidationBot struct {
 	checkInterval       time.Duration
 	mutex               sync.RWMutex
 	stopChan            chan struct{}
-	db                  *gorm.DB
-	checkpointRepo      *models.ProcessingCheckpointRepository
+	repo                *models.Repository
 	contractDeployBlock uint64 // Block number when contract was deployed
 }
 
 // NewLiquidationBot creates a new liquidation bot instance
-func NewLiquidationBot(cfg *config.Config, db *gorm.DB) (*LiquidationBot, error) {
-	client, err := evm.NewClient(cfg.RPCURL)
+func NewLiquidationBot(cfg *config.Config, repo *models.Repository) (*LiquidationBot, error) {
+	client, err := evm.NewClient(cfg.RpcUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to EVM client: %v", err)
 	}
@@ -94,8 +93,7 @@ func NewLiquidationBot(cfg *config.Config, db *gorm.DB) (*LiquidationBot, error)
 		cauldron:        cauldron,
 		checkInterval:   cfg.CheckInterval,
 		stopChan:        make(chan struct{}),
-		db:              db,
-		checkpointRepo:  models.NewProcessingCheckpointRepository(db),
+		repo:            repo,
 	}
 
 	// Get contract deployment block automatically
@@ -116,7 +114,7 @@ func NewLiquidationBot(cfg *config.Config, db *gorm.DB) (*LiquidationBot, error)
 // getContractDeploymentBlock finds the block where the contract was deployed
 func (lb *LiquidationBot) getContractDeploymentBlock() (uint64, error) {
 	// Check if we have a cached deployment block in checkpoints
-	checkpoint, err := lb.checkpointRepo.GetCheckpoint("contract_deployment")
+	checkpoint, err := lb.repo.GetCheckpoint(CheckpointContractDeployments)
 	if err == nil && checkpoint != nil {
 		lb.logOperation("info", fmt.Sprintf("Using cached contract deployment block: %d", checkpoint.BlockNumber))
 		return checkpoint.BlockNumber, nil
@@ -145,7 +143,7 @@ func (lb *LiquidationBot) getContractDeploymentBlock() (uint64, error) {
 	}
 
 	// Cache the deployment block for future use
-	err = lb.checkpointRepo.UpdateCheckpoint("contract_deployment", deploymentBlock, "")
+	err = lb.repo.UpdateCheckpoint(CheckpointContractDeployments, deploymentBlock, "")
 	if err != nil {
 		lb.logOperation("error", fmt.Sprintf("Failed to cache deployment block: %v", err))
 	}
@@ -210,13 +208,13 @@ func (lb *LiquidationBot) initializeCheckpoints() error {
 	}
 
 	// Initialize borrow events checkpoint
-	err = lb.checkpointRepo.SetCheckpointIfNotExists(CheckpointBorrowEvents, startBlock)
+	err = lb.repo.SetCheckpointIfNotExists(CheckpointBorrowEvents, startBlock)
 	if err != nil {
 		return fmt.Errorf("failed to set borrow events checkpoint: %v", err)
 	}
 
 	// Initialize liquidations checkpoint
-	err = lb.checkpointRepo.SetCheckpointIfNotExists(CheckpointLiquidations, startBlock)
+	err = lb.repo.SetCheckpointIfNotExists(CheckpointLiquidations, startBlock)
 	if err != nil {
 		return fmt.Errorf("failed to set liquidations checkpoint: %v", err)
 	}
@@ -385,7 +383,7 @@ func (lb *LiquidationBot) getAllBorrowers() ([]common.Address, error) {
 	}
 
 	// Get last processed block from checkpoint
-	checkpoint, err := lb.checkpointRepo.GetCheckpoint(CheckpointBorrowEvents)
+	checkpoint, err := lb.repo.GetCheckpoint(CheckpointBorrowEvents)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get borrow events checkpoint: %v", err)
 	}
@@ -424,7 +422,7 @@ func (lb *LiquidationBot) getAllBorrowers() ([]common.Address, error) {
 	}
 
 	// Update checkpoint
-	err = lb.checkpointRepo.UpdateCheckpoint(CheckpointBorrowEvents, latestBlock, "")
+	err = lb.repo.UpdateCheckpoint(CheckpointBorrowEvents, latestBlock, "")
 	if err != nil {
 		lb.logOperation("error", fmt.Sprintf("Failed to update borrow events checkpoint: %v", err))
 	}
@@ -451,34 +449,34 @@ func (lb *LiquidationBot) getAllBorrowers() ([]common.Address, error) {
 // queryLogsInChunks queries logs in chunks to handle RPC block range limits
 func (lb *LiquidationBot) queryLogsInChunks(fromBlock, toBlock uint64) ([]types.Log, error) {
 	var allLogs []types.Log
-	
+
 	for currentBlock := fromBlock; currentBlock <= toBlock; {
 		endBlock := currentBlock + MaxBlockRange - 1
 		if endBlock > toBlock {
 			endBlock = toBlock
 		}
-		
+
 		lb.logOperation("info", fmt.Sprintf("Querying logs from block %d to %d", currentBlock, endBlock))
-		
+
 		query := ethereum.FilterQuery{
 			FromBlock: big.NewInt(int64(currentBlock)),
 			ToBlock:   big.NewInt(int64(endBlock)),
 			Addresses: []common.Address{lb.cauldronAddress},
 			Topics:    [][]common.Hash{{crypto.Keccak256Hash([]byte("LogBorrow(address,address,uint256,uint256)"))}},
 		}
-		
+
 		logs, err := lb.queryLogsWithRetry(query, currentBlock, endBlock)
 		if err != nil {
 			return nil, fmt.Errorf("failed to filter logs for blocks %d-%d: %v", currentBlock, endBlock, err)
 		}
-		
+
 		allLogs = append(allLogs, logs...)
 		currentBlock = endBlock + 1
-		
+
 		// Add a small delay to avoid overwhelming the RPC
 		time.Sleep(100 * time.Millisecond)
 	}
-	
+
 	return allLogs, nil
 }
 
@@ -486,24 +484,24 @@ func (lb *LiquidationBot) queryLogsInChunks(fromBlock, toBlock uint64) ([]types.
 func (lb *LiquidationBot) queryLogsWithRetry(query ethereum.FilterQuery, fromBlock, toBlock uint64) ([]types.Log, error) {
 	const maxRetries = 3
 	const baseDelay = 1 * time.Second
-	
+
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		logs, err := lb.client.FilterLogs(context.Background(), query)
 		if err == nil {
 			return logs, nil
 		}
-		
+
 		// Check if this is a block range error that might require smaller chunks
 		if strings.Contains(err.Error(), "10,000 range") || strings.Contains(err.Error(), "Request Entity Too Large") {
 			// If we're already at minimum chunk size, return the error
 			if toBlock-fromBlock < 1000 {
 				return nil, fmt.Errorf("block range too large even for minimum chunk size: %v", err)
 			}
-			
+
 			// Split the range in half and retry
 			lb.logOperation("info", fmt.Sprintf("Block range too large, splitting range %d-%d", fromBlock, toBlock))
 			midBlock := (fromBlock + toBlock) / 2
-			
+
 			// Query first half
 			query1 := query
 			query1.ToBlock = big.NewInt(int64(midBlock))
@@ -511,7 +509,7 @@ func (lb *LiquidationBot) queryLogsWithRetry(query ethereum.FilterQuery, fromBlo
 			if err1 != nil {
 				return nil, err1
 			}
-			
+
 			// Query second half
 			query2 := query
 			query2.FromBlock = big.NewInt(int64(midBlock + 1))
@@ -519,10 +517,10 @@ func (lb *LiquidationBot) queryLogsWithRetry(query ethereum.FilterQuery, fromBlo
 			if err2 != nil {
 				return nil, err2
 			}
-			
+
 			return append(logs1, logs2...), nil
 		}
-		
+
 		// For other errors, retry with exponential backoff
 		if attempt < maxRetries-1 {
 			delay := baseDelay * time.Duration(1<<uint(attempt))
@@ -530,7 +528,7 @@ func (lb *LiquidationBot) queryLogsWithRetry(query ethereum.FilterQuery, fromBlo
 			time.Sleep(delay)
 		}
 	}
-	
+
 	return nil, fmt.Errorf("failed to query logs after %d attempts", maxRetries)
 }
 
@@ -588,14 +586,14 @@ func (lb *LiquidationBot) GetPositionInfo(userAddress common.Address) (*models.U
 	}
 
 	// Save to database
-	lb.db.Create(position)
+	lb.repo.Create(context.Background(), position)
 
 	return position, nil
 }
 
 // GetCheckpointStatus returns the current checkpoint status
 func (lb *LiquidationBot) GetCheckpointStatus() (map[string]*models.ProcessingCheckpoint, error) {
-	checkpoints, err := lb.checkpointRepo.GetAllCheckpoints()
+	checkpoints, err := lb.repo.GetAllCheckpoints()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get checkpoints: %v", err)
 	}
@@ -614,7 +612,7 @@ func (lb *LiquidationBot) ResetCheckpoint(name string, blockNumber uint64) error
 		return fmt.Errorf("cannot reset checkpoint while bot is running")
 	}
 
-	err := lb.checkpointRepo.UpdateCheckpoint(name, blockNumber, "")
+	err := lb.repo.UpdateCheckpoint(name, blockNumber, "")
 	if err != nil {
 		return fmt.Errorf("failed to reset checkpoint %s: %v", name, err)
 	}
@@ -635,7 +633,7 @@ func (lb *LiquidationBot) GetStatus() *models.BotStatus {
 		LastCheck:     time.Now(),
 	}
 
-	lb.db.Create(status)
+	lb.repo.Create(context.Background(), status)
 
 	return status
 }
@@ -651,7 +649,7 @@ func (lb *LiquidationBot) logOperation(level, message string) {
 		Level:   level,
 		Message: message,
 	}
-	lb.db.Create(logEntry)
+	lb.repo.Create(context.Background(), logEntry)
 }
 
 // parseABI parses the ABI from JSON string

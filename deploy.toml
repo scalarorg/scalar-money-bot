@@ -4,7 +4,7 @@
 [project]
 name = "scalar-money-contract"
 script = "Deploy"                                               # Will look for script/Deploy.s.sol
-network = "localhost"                                           # Default network to deploy to
+network = "sepolia"                                           # Default network to deploy to
 setup_command = "bun install"                                   # Command to install dependencies
 repo = "https://github.com/scalarorg/scalar-money-contract.git"
 path = "contracts"

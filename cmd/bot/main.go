@@ -27,7 +27,7 @@ func main() {
 	}
 
 	log.Printf("Starting liquidation bot with config: RPC=%s, Cauldron=%s, Port=%s",
-		cfg.RPCURL, cfg.CauldronAddress, cfg.Port)
+		cfg.RpcUrl, cfg.CauldronAddress, cfg.Port)
 
 	// Initialize database
 	db, err := database.Initialize(cfg.DatabaseURL)

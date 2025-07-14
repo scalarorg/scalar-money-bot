@@ -10,7 +10,7 @@ import (
 
 // Config holds all configuration values
 type Config struct {
-	RPCURL          string
+	RpcUrl          string
 	CauldronAddress string
 	PrivateKey      string
 	CheckInterval   time.Duration
@@ -20,14 +20,14 @@ type Config struct {
 }
 
 // LoadConfig loads configuration from environment variables
-func LoadConfig() (*Config, error) {
+func LoadConfig(filenames ...string) (*Config, error) {
 	// Load .env file if it exists
-	if err := godotenv.Load(); err != nil {
-		fmt.Println("No .env file found, using environment variables")
+	if err := godotenv.Load(filenames...); err != nil {
+		fmt.Printf("No %v file found, using environment variables\n", filenames)
 	}
 
 	config := &Config{
-		RPCURL:          getEnv("RPC_URL", ""),
+		RpcUrl:          getEnv("RPC_URL", ""),
 		CauldronAddress: getEnv("CAULDRON_ADDRESS", ""),
 		PrivateKey:      getEnv("PRIVATE_KEY", ""),
 		Port:            getEnv("PORT", "8080"),
@@ -44,7 +44,7 @@ func LoadConfig() (*Config, error) {
 	config.CheckInterval = interval
 
 	// Validate required fields
-	if config.RPCURL == "" {
+	if config.RpcUrl == "" {
 		return nil, fmt.Errorf("RPC_URL is required")
 	}
 	if config.CauldronAddress == "" {

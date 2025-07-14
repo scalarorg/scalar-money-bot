@@ -30,7 +30,7 @@ type LiquidationMonitor struct {
 
 // NewLiquidationMonitor creates a new liquidation monitor
 func NewLiquidationMonitor(cfg *config.Config, db *gorm.DB) (*LiquidationMonitor, error) {
-	client, err := evm.NewClient(cfg.RPCURL)
+	client, err := evm.NewClient(cfg.RpcUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Ethereum client: %v", err)
 	}
