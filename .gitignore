@@ -1,5 +1,5 @@
 
 .env
-**/.env
-contracts
+.contracts.env
 bin
+contracts

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"scalar-money-bot/constants"
 	"scalar-money-bot/internal/services"
 	"strconv"
 	"time"
@@ -9,6 +10,15 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/labstack/echo/v4"
 )
+
+type MessageResponse struct {
+	Message string `json:"message"`
+}
+
+type StatusResponse struct {
+	Status string `json:"status"`
+	Time   string `json:"time"`
+}
 
 // Handlers holds all HTTP handlers
 type Handlers struct {
@@ -46,28 +56,20 @@ func (h *Handlers) SetupRoutes(e *echo.Echo) {
 
 func (h *Handlers) handleStart(c echo.Context) error {
 	if h.bot.IsRunning() {
-		return c.JSON(http.StatusConflict, map[string]string{
-			"error": "Bot is already running",
-		})
+		return c.JSON(http.StatusConflict, constants.NewErrorResponse("Bot is already running"))
 	}
 
 	go h.bot.Start()
-	return c.JSON(http.StatusOK, map[string]string{
-		"message": "Bot started successfully",
-	})
+	return c.String(http.StatusOK, "Bot started successfully")
 }
 
 func (h *Handlers) handleStop(c echo.Context) error {
 	if !h.bot.IsRunning() {
-		return c.JSON(http.StatusConflict, map[string]string{
-			"error": "Bot is not running",
-		})
+		return c.JSON(http.StatusConflict, constants.NewErrorResponse("Bot is not running"))
 	}
 
 	h.bot.Stop()
-	return c.JSON(http.StatusOK, map[string]string{
-		"message": "Bot stopped successfully",
-	})
+	return c.String(http.StatusOK, "Bot stopped successfully")
 }
 
 func (h *Handlers) handleStatus(c echo.Context) error {
@@ -78,16 +80,12 @@ func (h *Handlers) handleStatus(c echo.Context) error {
 func (h *Handlers) handlePosition(c echo.Context) error {
 	userAddress := c.Param("address")
 	if !common.IsHexAddress(userAddress) {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "Invalid address format",
-		})
+		return c.JSON(http.StatusBadRequest, constants.NewErrorResponse("Invalid address format"))
 	}
 
 	position, err := h.bot.GetPositionInfo(common.HexToAddress(userAddress))
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": err.Error(),
-		})
+		return c.JSON(http.StatusInternalServerError, constants.NewErrorResponse(err.Error()))
 	}
 
 	return c.JSON(http.StatusOK, position)
@@ -96,9 +94,7 @@ func (h *Handlers) handlePosition(c echo.Context) error {
 func (h *Handlers) handleSystemHealth(c echo.Context) error {
 	health, err := h.monitor.GetSystemHealth()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": err.Error(),
-		})
+		return c.JSON(http.StatusInternalServerError, constants.NewErrorResponse(err.Error()))
 	}
 
 	return c.JSON(http.StatusOK, health)
@@ -116,9 +112,7 @@ func (h *Handlers) handleRecentLiquidations(c echo.Context) error {
 
 	events, err := h.monitor.GetRecentLiquidations(blocks)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": err.Error(),
-		})
+		return c.JSON(http.StatusInternalServerError, constants.NewErrorResponse(err.Error()))
 	}
 
 	return c.JSON(http.StatusOK, events)
@@ -136,17 +130,15 @@ func (h *Handlers) handleHistoricalLiquidations(c echo.Context) error {
 
 	events, err := h.monitor.GetHistoricalLiquidations(limit)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": err.Error(),
-		})
+		return c.JSON(http.StatusInternalServerError, constants.NewErrorResponse(err.Error()))
 	}
 
 	return c.JSON(http.StatusOK, events)
 }
 
 func (h *Handlers) handleHealthCheck(c echo.Context) error {
-	return c.JSON(http.StatusOK, map[string]string{
-		"status": "healthy",
-		"time":   time.Now().Format(time.RFC3339),
+	return c.JSON(http.StatusOK, StatusResponse{
+		Status: "healthy",
+		Time:   time.Now().Format(time.RFC3339),
 	})
 }

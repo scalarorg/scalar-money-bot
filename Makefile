@@ -100,3 +100,14 @@ deploy: ## Deploy to production (customize as needed)
 	@echo "Deploying to production..."
 	$(MAKE) docker-build
 	# Add your deployment commands here
+
+
+.PHONY: anvil setup-contracts
+anvil:
+	@if lsof -ti:8545 > /dev/null 2>&1; then \
+		echo "Anvil already running on port 8545"; \
+	else \
+		anvil --port 8545 --allow-origin "*"; \
+	fi
+setup-contracts:
+	@contract-deployer --config ./deploy.toml
