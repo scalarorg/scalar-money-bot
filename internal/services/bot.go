@@ -8,7 +8,7 @@ import (
 	"math/big"
 	"scalar-money-bot/constants"
 	"scalar-money-bot/internal/config"
-	"scalar-money-bot/internal/models"
+	"scalar-money-bot/internal/database"
 	"scalar-money-bot/pkg/evm"
 	"strings"
 	"sync"
@@ -48,18 +48,16 @@ type LiquidationBot struct {
 	checkInterval       time.Duration
 	mutex               sync.RWMutex
 	stopChan            chan struct{}
-	repo                *models.Repository
+	repo                *database.Repository
 	contractDeployBlock uint64 // Block number when contract was deployed
 }
 
 // NewLiquidationBot creates a new liquidation bot instance
-func NewLiquidationBot(cfg *config.Config, repo *models.Repository) (*LiquidationBot, error) {
+func NewLiquidationBot(cfg *config.Config, repo *database.Repository) (*LiquidationBot, error) {
 	client, err := evm.NewClient(cfg.RpcUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to EVM client: %v", err)
 	}
-
-	fmt.Printf("config: %+v\n", cfg)
 
 	privateKey, err := crypto.HexToECDSA(cfg.PrivateKey)
 	if err != nil {
@@ -346,6 +344,8 @@ func (lb *LiquidationBot) liquidateUsers(users []common.Address) error {
 			return fmt.Errorf("failed to get borrow part for user %s: %v", user.Hex(), err)
 		}
 
+		log.Printf("userBorrowPart: %v", result)
+
 		if len(result) == 0 {
 			return fmt.Errorf("no result from userBorrowPart call")
 		}
@@ -540,7 +540,7 @@ func (lb *LiquidationBot) getCachedBorrowers() []common.Address {
 }
 
 // GetPositionInfo retrieves position information for a user
-func (lb *LiquidationBot) GetPositionInfo(userAddress common.Address) (*models.UserPosition, error) {
+func (lb *LiquidationBot) GetPositionInfo(userAddress common.Address) (*database.UserPosition, error) {
 	var collateralShare, borrowPart, totalBorrowElastic, exchangeRate []interface{}
 
 	// Get user collateral share
@@ -576,7 +576,7 @@ func (lb *LiquidationBot) GetPositionInfo(userAddress common.Address) (*models.U
 		isInsolvent = false // Default to false if we can't check
 	}
 
-	position := &models.UserPosition{
+	position := &database.UserPosition{
 		User:            userAddress.Hex(),
 		CollateralShare: collateralShare[0].(*big.Int).String(),
 		BorrowPart:      borrowPart[0].(*big.Int).String(),
@@ -592,13 +592,13 @@ func (lb *LiquidationBot) GetPositionInfo(userAddress common.Address) (*models.U
 }
 
 // GetCheckpointStatus returns the current checkpoint status
-func (lb *LiquidationBot) GetCheckpointStatus() (map[string]*models.ProcessingCheckpoint, error) {
+func (lb *LiquidationBot) GetCheckpointStatus() (map[string]*database.ProcessingCheckpoint, error) {
 	checkpoints, err := lb.repo.GetAllCheckpoints()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get checkpoints: %v", err)
 	}
 
-	result := make(map[string]*models.ProcessingCheckpoint)
+	result := make(map[string]*database.ProcessingCheckpoint)
 	for i := range checkpoints {
 		result[checkpoints[i].Name] = &checkpoints[i]
 	}
@@ -626,8 +626,8 @@ func (lb *LiquidationBot) GetContractDeploymentBlock() (uint64, error) {
 	return lb.getContractDeploymentBlock()
 }
 
-func (lb *LiquidationBot) GetStatus() *models.BotStatus {
-	status := &models.BotStatus{
+func (lb *LiquidationBot) GetStatus() *database.BotStatus {
+	status := &database.BotStatus{
 		IsRunning:     lb.isRunning,
 		CheckInterval: lb.checkInterval.String(),
 		LastCheck:     time.Now(),
@@ -645,7 +645,7 @@ func (lb *LiquidationBot) LogOperation(level, message string) {
 func (lb *LiquidationBot) logOperation(level, message string) {
 	log.Printf("[%s] %s", level, message)
 
-	logEntry := &models.BotLog{
+	logEntry := &database.BotLog{
 		Level:   level,
 		Message: message,
 	}

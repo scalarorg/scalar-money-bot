@@ -57,8 +57,7 @@ docker-logs: ## Show Docker Compose logs
 	docker-compose logs -f
 
 docker-clean: ## Clean Docker images and containers
-	docker-compose down -v
-	docker rmi $(DOCKER_IMAGE) 2>/dev/null || true
+	docker-compose down --volumes --remove-orphans
 
 # Database targets
 db-migrate: ## Run database migrations

@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 	"scalar-money-bot/internal/config"
-	database "scalar-money-bot/internal/db"
+	"scalar-money-bot/internal/database"
 	"scalar-money-bot/internal/handlers"
 	"scalar-money-bot/internal/services"
 	"time"
@@ -35,13 +35,15 @@ func main() {
 		log.Fatal("Failed to initialize database:", err)
 	}
 
+	repo := database.NewRepository(db)
+
 	// Initialize services
-	bot, err := services.NewLiquidationBot(cfg, db)
+	bot, err := services.NewLiquidationBot(cfg, repo)
 	if err != nil {
 		log.Fatal("Failed to create liquidation bot:", err)
 	}
 
-	monitor, err := services.NewLiquidationMonitor(cfg, db)
+	monitor, err := services.NewLiquidationMonitor(cfg, repo)
 	if err != nil {
 		log.Fatal("Failed to create liquidation monitor:", err)
 	}

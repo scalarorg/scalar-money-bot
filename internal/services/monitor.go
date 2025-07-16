@@ -6,7 +6,7 @@ import (
 	"math/big"
 	"scalar-money-bot/constants"
 	"scalar-money-bot/internal/config"
-	"scalar-money-bot/internal/models"
+	"scalar-money-bot/internal/database"
 	"scalar-money-bot/pkg/evm"
 	"strings"
 
@@ -16,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"gorm.io/gorm"
 )
 
 // LiquidationMonitor handles monitoring and dashboard functionality
@@ -25,11 +24,11 @@ type LiquidationMonitor struct {
 	cauldronAddress common.Address
 	cauldronABI     abi.ABI
 	cauldron        *bind.BoundContract
-	db              *gorm.DB
+	repo            *database.Repository
 }
 
 // NewLiquidationMonitor creates a new liquidation monitor
-func NewLiquidationMonitor(cfg *config.Config, db *gorm.DB) (*LiquidationMonitor, error) {
+func NewLiquidationMonitor(cfg *config.Config, repo *database.Repository) (*LiquidationMonitor, error) {
 	client, err := evm.NewClient(cfg.RpcUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Ethereum client: %v", err)
@@ -48,12 +47,12 @@ func NewLiquidationMonitor(cfg *config.Config, db *gorm.DB) (*LiquidationMonitor
 		cauldronAddress: cauldronAddr,
 		cauldronABI:     cauldronABI,
 		cauldron:        cauldron,
-		db:              db,
+		repo:            repo,
 	}, nil
 }
 
 // GetSystemHealth retrieves system health information
-func (lm *LiquidationMonitor) GetSystemHealth() (*models.SystemHealth, error) {
+func (lm *LiquidationMonitor) GetSystemHealth() (*database.SystemHealth, error) {
 	var (
 		totalBorrow           []interface{}
 		totalCollateralShare  []interface{}
@@ -92,7 +91,7 @@ func (lm *LiquidationMonitor) GetSystemHealth() (*models.SystemHealth, error) {
 		return nil, fmt.Errorf("failed to get collateralization rate: %v", err)
 	}
 
-	health := &models.SystemHealth{
+	health := &database.SystemHealth{
 		TotalBorrowElastic:    totalBorrow[0].(*big.Int).String(),
 		TotalBorrowBase:       totalBorrow[1].(*big.Int).String(),
 		TotalCollateralShare:  totalCollateralShare[0].(*big.Int).String(),
@@ -102,13 +101,13 @@ func (lm *LiquidationMonitor) GetSystemHealth() (*models.SystemHealth, error) {
 	}
 
 	// Save to database
-	lm.db.Create(health)
+	lm.repo.Create(context.Background(), health)
 
 	return health, nil
 }
 
 // GetRecentLiquidations retrieves recent liquidation events
-func (lm *LiquidationMonitor) GetRecentLiquidations(blocks uint64) ([]*models.LiquidationEvent, error) {
+func (lm *LiquidationMonitor) GetRecentLiquidations(blocks uint64) ([]*database.LiquidationEvent, error) {
 	latestBlock, err := lm.client.BlockNumber(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get latest block: %v", err)
@@ -131,10 +130,10 @@ func (lm *LiquidationMonitor) GetRecentLiquidations(blocks uint64) ([]*models.Li
 		return nil, fmt.Errorf("failed to filter logs: %v", err)
 	}
 
-	var events []*models.LiquidationEvent
+	var events []*database.LiquidationEvent
 	for _, vLog := range logs {
 		if len(vLog.Topics) >= 4 {
-			event := &models.LiquidationEvent{
+			event := &database.LiquidationEvent{
 				TxHash:      vLog.TxHash.Hex(),
 				BlockNumber: vLog.BlockNumber,
 				Liquidator:  common.BytesToAddress(vLog.Topics[1].Bytes()).Hex(),
@@ -143,7 +142,7 @@ func (lm *LiquidationMonitor) GetRecentLiquidations(blocks uint64) ([]*models.Li
 			}
 
 			// Save to database
-			lm.db.FirstOrCreate(event, models.LiquidationEvent{TxHash: event.TxHash})
+			lm.repo.FirstOrCreate(context.Background(), event, database.LiquidationEvent{TxHash: event.TxHash})
 			events = append(events, event)
 		}
 	}
@@ -152,10 +151,10 @@ func (lm *LiquidationMonitor) GetRecentLiquidations(blocks uint64) ([]*models.Li
 }
 
 // GetHistoricalLiquidations retrieves liquidation events from database
-func (lm *LiquidationMonitor) GetHistoricalLiquidations(limit int) ([]*models.LiquidationEvent, error) {
-	var events []*models.LiquidationEvent
+func (lm *LiquidationMonitor) GetHistoricalLiquidations(limit int) ([]*database.LiquidationEvent, error) {
+	var events []*database.LiquidationEvent
 
-	result := lm.db.Order("created_at desc").Limit(limit).Find(&events)
+	result := lm.repo.Raw().Order("created_at desc").Limit(limit).Find(&events)
 	if result.Error != nil {
 		return nil, result.Error
 	}
